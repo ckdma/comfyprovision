@@ -19,24 +19,31 @@ PIP_PACKAGES=(
 )
 
 NODES=(
-    
+    "https://github.com/jags111/efficiency-nodes-comfyui"
+    "https://github.com/city96/ComfyUI-GGUF"
 )
 
 CHECKPOINT_MODELS=(
+    
 )
 
 CLIP_MODELS=(
-    "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors"
-    "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp16.safetensors"
+    # "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors"
+    # "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp16.safetensors"
+    "https://huggingface.co/city96/t5-v1_1-xxl-encoder-gguf/resolve/main/t5-v1_1-xxl-encoder-Q8_0.gguf"
 )
 
 UNET_MODELS=(
+  # "https://huggingface.co/city96/FLUX.1-dev-gguf/resolve/main/flux1-dev-Q8_0.gguf"
 )
 
 VAE_MODELS=(
 )
 
 LORA_MODELS=(
+    "https://huggingface.co/Aitrepreneur/FLX/resolve/main/FLUX-dev-lora-AntiBlur.safetensors"
+    "https://huggingface.co/alimama-creative/FLUX.1-Turbo-Alpha/resolve/main/diffusion_pytorch_model.safetensors"
+    "https://civitai.com/api/download/models/917520?type=Model&format=SafeTensor"
 )
 
 ESRGAN_MODELS=(
@@ -46,6 +53,7 @@ ESRGAN_MODELS=(
 )
 
 CONTROLNET_MODELS=(
+    "https://huggingface.co/Aitrepreneur/FLX/resolve/main/Shakker-LabsFLUX.1-dev-ControlNet-Union-Pro.safetensors"
 )
 
 ### DO NOT EDIT BELOW HERE UNLESS YOU KNOW WHAT YOU ARE DOING ###
@@ -59,7 +67,7 @@ function provisioning_start() {
 
     # Get licensed models if HF_TOKEN set & valid
     if provisioning_has_valid_hf_token; then
-        UNET_MODELS+=("https://huggingface.co/black-forest-labs/FLUX.1-dev/resolve/main/flux1-dev.safetensors")
+        UNET_MODELS+=(""https://huggingface.co/city96/FLUX.1-dev-gguf/resolve/main/flux1-dev-Q8_0.gguf"")
         VAE_MODELS+=("https://huggingface.co/black-forest-labs/FLUX.1-dev/resolve/main/ae.safetensors")
     else
         UNET_MODELS+=("https://huggingface.co/black-forest-labs/FLUX.1-schnell/resolve/main/flux1-schnell.safetensors")
