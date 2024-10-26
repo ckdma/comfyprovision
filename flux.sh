@@ -1,3 +1,4 @@
+
 #!/bin/bash
 
 # This file will be sourced in init.sh
@@ -38,7 +39,6 @@ declare -A CHECKPOINT_MODELS=(
 declare -A CLIP_MODELS=(
     ["https://huggingface.co/city96/t5-v1_1-xxl-encoder-gguf/resolve/main/t5-v1_1-xxl-encoder-Q8_0.gguf"]="t5-encoder.gguf"
     ["https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors"]="clip-large.safetensors"
-    
 )
 
 declare -A UNET_MODELS=(
@@ -64,7 +64,6 @@ declare -A ESRGAN_MODELS=(
 
 declare -A CONTROLNET_MODELS=(
     ["https://huggingface.co/Aitrepreneur/FLX/resolve/main/Shakker-LabsFLUX.1-dev-ControlNet-Union-Pro.safetensors"]="controlnet-union-pro.safetensors"
-    
 )
 
 ### DO NOT EDIT BELOW HERE UNLESS YOU KNOW WHAT YOU ARE DOING ###
@@ -91,27 +90,10 @@ function provisioning_start() {
     provisioning_get_default_workflow
     provisioning_get_nodes
     provisioning_get_pip_packages
-    provisioning_get_models \
-        "${WORKSPACE}/storage/stable_diffusion/models/ckpt" \
-        "$(declare -p CHECKPOINT_MODELS)"
-    provisioning_get_models \
-        "${WORKSPACE}/storage/stable_diffusion/models/unet" \
-        "$(declare -p UNET_MODELS)"
-    provisioning_get_models \
-        "${WORKSPACE}/storage/stable_diffusion/models/lora" \
-        "$(declare -p LORA_MODELS)"
-    provisioning_get_models \
-        "${WORKSPACE}/storage/stable_diffusion/models/controlnet" \
-        "$(declare -p CONTROLNET_MODELS)"
-    provisioning_get_models \
-        "${WORKSPACE}/storage/stable_diffusion/models/vae" \
-        "$(declare -p VAE_MODELS)"
-    provisioning_get_models \
-        "${WORKSPACE}/storage/stable_diffusion/models/clip" \
-        "$(declare -p CLIP_MODELS)"
-    provisioning_get_models \
-        "${WORKSPACE}/storage/stable_diffusion/models/esrgan" \
-        "$(declare -p ESRGAN_MODELS)"
+    
+    # Start all downloads in parallel
+    start_parallel_downloads
+    
     provisioning_print_end
 }
 
@@ -167,25 +149,116 @@ function provisioning_get_default_workflow() {
     fi
 }
 
-function provisioning_get_models() {
-    local dir="$1"
-    local model_array="$2"
+function start_parallel_downloads() {
+    local pids=()
+    local total_downloads=0
+    local completed_downloads=0
     
-    if [[ -z $model_array ]]; then return 1; fi
+    # Create a temporary directory for download status files
+    local tmp_dir="/tmp/download_status"
+    rm -rf "$tmp_dir"
+    mkdir -p "$tmp_dir"
     
-    mkdir -p "$dir"
+    # Function to download a category of models
+    download_category() {
+        local dir="$1"
+        local model_array="$2"
+        local category_name="$3"
+        
+        mkdir -p "$dir"
+        eval "declare -A models=${model_array#*=}"
+        
+        for url in "${!models[@]}"; do
+            local filename="${models[$url]}"
+            local status_file="${tmp_dir}/${category_name}_${filename//\//_}"
+            
+            # Start download in background
+            (
+                echo "0" > "$status_file"
+                if provisioning_download "${url}" "${dir}" "${filename}" "$status_file"; then
+                    echo "100" > "$status_file"
+                    echo "Completed: ${category_name}/${filename}"
+                else
+                    echo "Failed: ${category_name}/${filename}"
+                fi
+            ) &
+            pids+=($!)
+            ((total_downloads++))
+        done
+    }
     
-    # Convert the passed array declaration into an associative array
-    eval "declare -A models=${model_array#*=}"
+    # Start all downloads
+    local model_types=(
+        "checkpoint|CHECKPOINT_MODELS"
+        "unet|UNET_MODELS"
+        "lora|LORA_MODELS"
+        "controlnet|CONTROLNET_MODELS"
+        "vae|VAE_MODELS"
+        "clip|CLIP_MODELS"
+        "esrgan|ESRGAN_MODELS"
+    )
     
-    printf "Downloading %s model(s) to %s...\n" "${#models[@]}" "$dir"
-    
-    for url in "${!models[@]}"; do
-        local filename="${models[$url]}"
-        printf "Downloading: %s as %s\n" "${url}" "${filename}"
-        provisioning_download "${url}" "${dir}" "${filename}"
-        printf "\n"
+    for type_info in "${model_types[@]}"; do
+        IFS="|" read -r folder var_name <<< "$type_info"
+        if [[ -v "$var_name" ]]; then
+            download_category "${WORKSPACE}/storage/stable_diffusion/models/${folder}" "$(declare -p $var_name)" "$folder"
+        fi
     done
+    
+    # Monitor progress
+    echo "Starting $total_downloads downloads in parallel..."
+    
+    # Wait for all downloads to complete while showing progress
+    while [ ${#pids[@]} -gt 0 ]; do
+        for pid in "${pids[@]}"; do
+            if ! kill -0 $pid 2>/dev/null; then
+                # Process completed
+                pids=("${pids[@]/$pid}")
+                ((completed_downloads++))
+                printf "\rCompleted: $completed_downloads/$total_downloads downloads"
+            fi
+        done
+        sleep 1
+    done
+    
+    echo -e "\nAll downloads completed!"
+    
+    # Cleanup
+    rm -rf "$tmp_dir"
+}
+
+function provisioning_download() {
+    local url="$1"
+    local dir="$2"
+    local filename="$3"
+    local status_file="$4"
+    
+    if [[ -n $HF_TOKEN && $url =~ ^https://([a-zA-Z0-9_-]+\.)?huggingface\.co(/|$|\?) ]]; then
+        # Hugging Face: Use header-based authentication
+        wget --header="Authorization: Bearer $HF_TOKEN" \
+             --progress=dot:giga \
+             -c -O "${dir}/${filename}" \
+             "$url" 2>&1 | grep "%" | sed -u -e "s,\.,,g" | awk '{print $2}' > "$status_file"
+    elif [[ -n $CIVITAI_TOKEN && $url =~ ^https://([a-zA-Z0-9_-]+\.)?civitai\.com(/|$|\?) ]]; then
+        # Civitai: Append token to URL
+        local download_url
+        if [[ $url == *"?"* ]]; then
+            download_url="${url}&token=${CIVITAI_TOKEN}"
+        else
+            download_url="${url}?token=${CIVITAI_TOKEN}"
+        fi
+        wget --progress=dot:giga \
+             -c -O "${dir}/${filename}" \
+             "$download_url" 2>&1 | grep "%" | sed -u -e "s,\.,,g" | awk '{print $2}' > "$status_file"
+    else
+        # No authentication needed
+        wget --progress=dot:giga \
+             -c -O "${dir}/${filename}" \
+             "$url" 2>&1 | grep "%" | sed -u -e "s,\.,,g" | awk '{print $2}' > "$status_file"
+    fi
+    
+    # Return wget's exit status
+    return ${PIPESTATUS[0]}
 }
 
 function provisioning_print_header() {
@@ -228,30 +301,6 @@ function provisioning_has_valid_civitai_token() {
         return 0
     else
         return 1
-    fi
-}
-
-function provisioning_download() {
-    local url="$1"
-    local dir="$2"
-    local filename="$3"
-    
-    if [[ -n $HF_TOKEN && $url =~ ^https://([a-zA-Z0-9_-]+\.)?huggingface\.co(/|$|\?) ]]; then
-        # Hugging Face: Use header-based authentication
-        wget --header="Authorization: Bearer $HF_TOKEN" -qnc --show-progress -e dotbytes=4M -O "${dir}/${filename}" "$url"
-    elif [[ -n $CIVITAI_TOKEN && $url =~ ^https://([a-zA-Z0-9_-]+\.)?civitai\.com(/|$|\?) ]]; then
-        # Civitai: Append token to URL
-        local download_url
-        if [[ $url == *"?"* ]]; then
-            download_url="${url}&token=${CIVITAI_TOKEN}"
-        else
-            download_url="${url}?token=${CIVITAI_TOKEN}"
-        fi
-        echo "Downloading from Civitai: ${url} (token appended)"
-        wget -qnc --show-progress -e dotbytes=4M -O "${dir}/${filename}" "$download_url"
-    else
-        # No authentication needed
-        wget -qnc --show-progress -e dotbytes=4M -O "${dir}/${filename}" "$url"
     fi
 }
 
