@@ -232,33 +232,184 @@ function provisioning_download() {
     local dir="$2"
     local filename="$3"
     local status_file="$4"
+    local log_file="/tmp/download_${filename}.log"
+    local max_retries=3
+    local retry_count=0
+    local success=false
+
+    echo "Starting download: $filename from $url" | tee -a "$log_file"
     
-    if [[ -n $HF_TOKEN && $url =~ ^https://([a-zA-Z0-9_-]+\.)?huggingface\.co(/|$|\?) ]]; then
-        # Hugging Face: Use header-based authentication
-        wget --header="Authorization: Bearer $HF_TOKEN" \
-             --progress=dot:giga \
-             -c -O "${dir}/${filename}" \
-             "$url" 2>&1 | grep "%" | sed -u -e "s,\.,,g" | awk '{print $2}' > "$status_file"
-    elif [[ -n $CIVITAI_TOKEN && $url =~ ^https://([a-zA-Z0-9_-]+\.)?civitai\.com(/|$|\?) ]]; then
-        # Civitai: Append token to URL
-        local download_url
-        if [[ $url == *"?"* ]]; then
-            download_url="${url}&token=${CIVITAI_TOKEN}"
-        else
-            download_url="${url}?token=${CIVITAI_TOKEN}"
+    # Create directory if it doesn't exist
+    mkdir -p "$dir"
+
+    while [ $retry_count -lt $max_retries ] && [ "$success" = false ]; do
+        if [ $retry_count -gt 0 ]; then
+            echo "Retry attempt $retry_count for $filename" | tee -a "$log_file"
+            sleep 5
         fi
-        wget --progress=dot:giga \
-             -c -O "${dir}/${filename}" \
-             "$download_url" 2>&1 | grep "%" | sed -u -e "s,\.,,g" | awk '{print $2}' > "$status_file"
+
+        if [[ -n $HF_TOKEN && $url =~ ^https://([a-zA-Z0-9_-]+\.)?huggingface\.co(/|$|\?) ]]; then
+            echo "Using Hugging Face authentication for $filename" | tee -a "$log_file"
+            wget --header="Authorization: Bearer $HF_TOKEN" \
+                 --tries=3 \
+                 --timeout=30 \
+                 --retry-connrefused \
+                 --no-verbose \
+                 -c -O "${dir}/${filename}" \
+                 "$url" 2>> "$log_file"
+        
+        elif [[ -n $CIVITAI_TOKEN && $url =~ ^https://([a-zA-Z0-9_-]+\.)?civitai\.com(/|$|\?) ]]; then
+            echo "Using Civitai authentication for $filename" | tee -a "$log_file"
+            local download_url
+            if [[ $url == *"?"* ]]; then
+                download_url="${url}&token=${CIVITAI_TOKEN}"
+            else
+                download_url="${url}?token=${CIVITAI_TOKEN}"
+            fi
+            echo "Constructed Civitai URL (token hidden)" | tee -a "$log_file"
+            wget --tries=3 \
+                 --timeout=30 \
+                 --retry-connrefused \
+                 --no-verbose \
+                 -c -O "${dir}/${filename}" \
+                 "$download_url" 2>> "$log_file"
+        
+        else
+            echo "No authentication required for $filename" | tee -a "$log_file"
+            wget --tries=3 \
+                 --timeout=30 \
+                 --retry-connrefused \
+                 --no-verbose \
+                 -c -O "${dir}/${filename}" \
+                 "$url" 2>> "$log_file"
+        fi
+
+        if [ $? -eq 0 ] && [ -f "${dir}/${filename}" ] && [ -s "${dir}/${filename}" ]; then
+            success=true
+            echo "Successfully downloaded $filename" | tee -a "$log_file"
+        else
+            ((retry_count++))
+            echo "Download failed for $filename (attempt $retry_count of $max_retries)" | tee -a "$log_file"
+        fi
+    done
+
+    if [ "$success" = true ]; then
+        echo "100" > "$status_file"
+        return 0
     else
-        # No authentication needed
-        wget --progress=dot:giga \
-             -c -O "${dir}/${filename}" \
-             "$url" 2>&1 | grep "%" | sed -u -e "s,\.,,g" | awk '{print $2}' > "$status_file"
+        echo "Failed to download $filename after $max_retries attempts" | tee -a "$log_file"
+        echo "0" > "$status_file"
+        return 1
     fi
+}
+
+function start_parallel_downloads() {
+    local pids=()
+    local total_downloads=0
+    local completed_downloads=0
+    local failed_downloads=0
+    local tmp_dir="/tmp/download_status"
     
-    # Return wget's exit status
-    return ${PIPESTATUS[0]}
+    # Cleanup previous status files
+    rm -rf "$tmp_dir"
+    mkdir -p "$tmp_dir"
+    
+    # Maximum concurrent downloads
+    local max_concurrent=5
+    local current_downloads=0
+    
+    download_category() {
+        local dir="$1"
+        local model_array="$2"
+        local category_name="$3"
+        
+        mkdir -p "$dir"
+        eval "declare -A models=${model_array#*=}"
+        
+        for url in "${!models[@]}"; do
+            local filename="${models[$url]}"
+            local status_file="${tmp_dir}/${category_name}_${filename//\//_}"
+            
+            # Wait if we've reached max concurrent downloads
+            while [ $current_downloads -ge $max_concurrent ]; do
+                for pid in "${pids[@]}"; do
+                    if ! kill -0 $pid 2>/dev/null; then
+                        pids=("${pids[@]/$pid}")
+                        ((current_downloads--))
+                        ((completed_downloads++))
+                        printf "\rCompleted: %d/%d downloads (Failed: %d)" "$completed_downloads" "$total_downloads" "$failed_downloads"
+                    fi
+                done
+                sleep 1
+            done
+            
+            # Start new download
+            (
+                if provisioning_download "${url}" "${dir}" "${filename}" "$status_file"; then
+                    echo "Completed: ${category_name}/${filename}"
+                else
+                    echo "Failed: ${category_name}/${filename}"
+                    ((failed_downloads++))
+                fi
+            ) &
+            
+            pids+=($!)
+            ((current_downloads++))
+            ((total_downloads++))
+        done
+    }
+    
+    # Start downloads by category
+    echo "Starting downloads..."
+    local model_types=(
+        "checkpoint|CHECKPOINT_MODELS"
+        "unet|UNET_MODELS"
+        "lora|LORA_MODELS"
+        "controlnet|CONTROLNET_MODELS"
+        "vae|VAE_MODELS"
+        "clip|CLIP_MODELS"
+        "esrgan|ESRGAN_MODELS"
+    )
+    
+    for type_info in "${model_types[@]}"; do
+        IFS="|" read -r folder var_name <<< "$type_info"
+        if [[ -v "$var_name" ]]; then
+            download_category "${WORKSPACE}/storage/stable_diffusion/models/${folder}" "$(declare -p $var_name)" "$folder"
+        fi
+    done
+    
+    # Wait for remaining downloads
+    echo "Waiting for downloads to complete..."
+    while [ ${#pids[@]} -gt 0 ]; do
+        for pid in "${pids[@]}"; do
+            if ! kill -0 $pid 2>/dev/null; then
+                pids=("${pids[@]/$pid}")
+                ((completed_downloads++))
+                printf "\rCompleted: %d/%d downloads (Failed: %d)" "$completed_downloads" "$total_downloads" "$failed_downloads"
+            fi
+        done
+        sleep 1
+    done
+    
+    echo -e "\n\nDownload Summary:"
+    echo "Total downloads: $total_downloads"
+    echo "Successful downloads: $((completed_downloads - failed_downloads))"
+    echo "Failed downloads: $failed_downloads"
+    
+    # Show failed downloads from logs
+    echo -e "\nFailed downloads detail:"
+    for log in /tmp/download_*.log; do
+        if grep -q "Failed to download" "$log"; then
+            echo "- $(basename "$log" .log)"
+            tail -n 3 "$log"
+        fi
+    done
+    
+    # Cleanup
+    rm -rf "$tmp_dir"
+    
+    # Return failure if any downloads failed
+    [ $failed_downloads -eq 0 ]
 }
 
 function provisioning_print_header() {
