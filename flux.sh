@@ -21,14 +21,6 @@ NODES=(
 "https://github.com/jags111/efficiency-nodes-comfyui"
 "https://github.com/city96/ComfyUI-GGUF"
 "https://github.com/Fannovel16/comfyui_controlnet_aux"
-"https://github.com/jags111/efficiency-nodes-comfyui"
-"https://github.com/ltdrdata/ComfyUI-Impact-Pack"
-"https://github.com/ltdrdata/ComfyUI-Inspire-Pack"
-"https://github.com/WASasquatch/was-node-suite-comfyui"
-"https://github.com/crystian/ComfyUI-Crystools"
-"https://github.com/adieyal/comfyui-dynamicprompts"
-"https://github.com/SeargeDP/ComfyUI_Searge_LLM?tab=readme-ov-file#potential-problems"
-"https://github.com/dagthomas/comfyui_dagthomas"
 )
 
 # Updated model arrays to use associative array format for custom filenames
